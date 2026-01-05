@@ -26,3 +26,10 @@ logging:
     com.hmdp: debug
   pattern:
     dateformat: mm:ss.SSS
+
+es:
+  host: localhost
+  port: 9200
+  scheme: http
+  index:
+    shop: hm_shop
