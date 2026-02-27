@@ -17,6 +17,9 @@ import org.springframework.data.redis.connection.stream.*;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
+import com.hmdp.config.RabbitConfig;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
@@ -44,6 +47,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
+    @Resource
+    private RabbitTemplate rabbitTemplate;
+
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
 
     static {
@@ -52,7 +58,40 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         SECKILL_SCRIPT.setResultType(Long.class);
     }
 
+    public Result seckillVoucherSync(Long voucherId) {
+        Long userId = UserHolder.getUser().getId();
+        long orderId = redisIdWorker.nextId("order");
+        // 1.执行lua脚本
+        Long result = stringRedisTemplate.execute(
+                SECKILL_SCRIPT,
+                Collections.emptyList(),
+                voucherId.toString(), userId.toString(), String.valueOf(orderId)
+        );
+        int r = result.intValue();
+        // 2.判断结果是否为0
+        if (r != 0) {
+            // 2.1.不为0 ，代表没有购买资格
+            return Result.fail(r == 1 ? "库存不足" : "不能重复下单");
+        }
 
+        // 2.2.为0 ，有购买资格，同步下单
+        VoucherOrder voucherOrder = new VoucherOrder();
+        // 2.3.订单id
+        voucherOrder.setId(orderId);
+        // 2.4.用户id
+        voucherOrder.setUserId(userId);
+        // 2.5.代金券id
+        voucherOrder.setVoucherId(voucherId);
+        
+        // 2.6.同步调用 createVoucherOrder
+        createVoucherOrder(voucherOrder);
+
+        // 3.返回订单id
+        return Result.ok(orderId);
+    }
+
+
+/*
     private static final ExecutorService SECKILL_ORDER_EXECUTOR = Executors.newSingleThreadExecutor();
 
     @PostConstruct
@@ -61,7 +100,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
 
     private class VoucherOrderHandler implements Runnable {
-
         @Override
         public void run() {
             while (true) {
@@ -118,6 +156,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     log.error("处理订单异常", e);
                 }
             }
+        }
+    }
+*/
+
+    @RabbitListener(queues = RabbitConfig.QUEUE_NAME)
+    public void listenSeckillQueue(VoucherOrder voucherOrder){
+        try {
+            createVoucherOrder(voucherOrder);
+        } catch (Exception e) {
+            log.error("消费消息失败", e);
         }
     }
 
@@ -182,6 +230,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
     }
 
+    @Override
     public Result seckillVoucher(Long voucherId) {
         Long userId = UserHolder.getUser().getId();
         long orderId = redisIdWorker.nextId("order");
@@ -197,6 +246,18 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             // 2.1.不为0 ，代表没有购买资格
             return Result.fail(r == 1 ? "库存不足" : "不能重复下单");
         }
+
+        // 2.2.为0 ，有购买资格，把下单信息保存到 RabbitMQ
+        VoucherOrder voucherOrder = new VoucherOrder();
+        // 2.3.订单id
+        voucherOrder.setId(orderId);
+        // 2.4.用户id
+        voucherOrder.setUserId(userId);
+        // 2.5.代金券id
+        voucherOrder.setVoucherId(voucherId);
+        // 2.6.放入MQ
+        rabbitTemplate.convertAndSend(RabbitConfig.EXCHANGE_NAME, RabbitConfig.ROUTING_KEY, voucherOrder);
+
         // 3.返回订单id
         return Result.ok(orderId);
     }
@@ -214,8 +275,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         // 2.判断结果是否为0
         if (r != 0) {
             // 2.1.不为0 ，代表没有购买资格
-            return Result.fail(r == 1 ? "库存不足" : "不能重复下单");
+            return Result.fail(r == 1 ? "库存不足(Code:1)" : "不能重复下单(Code:2)");
         }
+
         // 2.2.为0 ，有购买资格，把下单信息保存到阻塞队列
         VoucherOrder voucherOrder = new VoucherOrder();
         // 2.3.订单id

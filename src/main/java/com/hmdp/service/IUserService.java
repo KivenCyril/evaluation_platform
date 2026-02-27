@@ -25,4 +25,5 @@ public interface IUserService extends IService<User> {
 
     Result signCount();
 
+    User getPhone(String phone);
 }
